@@ -5,14 +5,18 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+import hmac
+import json
 import os
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+teacher_auth = HTTPBasic()
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
@@ -88,8 +92,68 @@ def get_activities():
     return activities
 
 
+def require_teacher(
+    credentials: HTTPBasicCredentials = Depends(teacher_auth),
+):
+    """Verify credentials configured for teacher accounts."""
+    configured_credentials = os.environ.get("TEACHER_CREDENTIALS")
+    if not configured_credentials:
+        raise HTTPException(
+            status_code=503,
+            detail="Teacher access is not configured",
+        )
+
+    try:
+        teachers = json.loads(configured_credentials)
+    except json.JSONDecodeError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Teacher access is not configured correctly",
+        ) from error
+
+    if not isinstance(teachers, dict) or not teachers or any(
+        not isinstance(username, str)
+        or not username
+        or not isinstance(password, str)
+        or not password
+        for username, password in teachers.items()
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Teacher access is not configured correctly",
+        )
+
+    valid_credentials = False
+    for username, password in teachers.items():
+        username_matches = hmac.compare_digest(
+            credentials.username.encode("utf-8"),
+            username.encode("utf-8"),
+        )
+        password_matches = hmac.compare_digest(
+            credentials.password.encode("utf-8"),
+            password.encode("utf-8"),
+        )
+        valid_credentials |= username_matches & password_matches
+
+    if not valid_credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid teacher credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
+@app.get("/teacher/session")
+def verify_teacher_session(_teacher: None = Depends(require_teacher)):
+    return {"message": "Teacher authenticated"}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(
+    activity_name: str,
+    email: str,
+    _teacher: None = Depends(require_teacher),
+):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +175,11 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(
+    activity_name: str,
+    email: str,
+    _teacher: None = Depends(require_teacher),
+):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
